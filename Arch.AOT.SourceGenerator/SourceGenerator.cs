@@ -14,13 +14,9 @@ namespace Arch.AOT.SourceGenerator;
 [Generator(LanguageNames.CSharp)]
 public sealed class ComponentRegistryGenerator : IIncrementalGenerator
 {
+	private static readonly string[] _archQueryDescriptionMethods = { "WithAny", "WithAll", "WithNone", "WithExclusive" };
 	/// <summary>
-	///		A <see cref="List{T}"/> of annotated components (their types) found via the source-gen. 
-	/// </summary>
-	private readonly List<ComponentType> _componentTypes = new();
-	
-	/// <summary>
-	///		The attribute to mark components with in order to be found by this source-gen. 
+	///     The attribute to mark components with in order to be found by this source-gen.
 	/// </summary>
 	private const string AttributeTemplate = """
 	                                         using System;
@@ -31,22 +27,43 @@ public sealed class ComponentRegistryGenerator : IIncrementalGenerator
 	                                             public sealed class ComponentAttribute : Attribute { }
 	                                         }
 	                                         """;
+
 	public void Initialize(IncrementalGeneratorInitializationContext context)
 	{
+		Log.LogInfo("INITIALIZING COMPONENT REGISTRY GENERATOR");
+
 		// Register the attribute.
 		context.RegisterPostInitializationOutput(initializationContext =>
 		{
 			initializationContext.AddSource("Components.Attributes.g.cs", SourceText.From(AttributeTemplate, Encoding.UTF8));
 		});
 
-		var provider = context.SyntaxProvider.CreateSyntaxProvider(
+		IncrementalValuesProvider<ImmutableArray<ComponentType>> provider = context.SyntaxProvider.CreateSyntaxProvider(
 			ShouldTypeBeRegistered,
-			GetMemberDeclarationsForSourceGen).Where(t => t.attributeFound).Select((t, _) => t.Item1
+			GetMemberDeclarationsForSourceGen).Where(t => t.foundTypes).Select((t, _) => t.Item1
 		);
 
 		context.RegisterSourceOutput(
-			context.CompilationProvider.Combine(provider.Collect()), (productionContext, tuple) => GenerateCode(productionContext, tuple.Left, tuple.Right)
-		);
+			context.CompilationProvider.Combine(provider.Collect()), (productionContext, tuple) =>
+			{
+				ImmutableArray<ComponentType>.Builder builder = ImmutableArray.CreateBuilder<ComponentType>();
+
+				foreach (ImmutableArray<ComponentType> array in tuple.Right)
+				{
+					foreach (ComponentType type in array)
+					{
+						if (!builder.Contains(type))
+						{
+							builder.Add(type);
+						}
+					}
+				}
+
+				ImmutableArray<ComponentType> result = builder.ToImmutable();
+				Log.LogInfo($"Should generate code {result.Length}");
+
+				GenerateCode(productionContext, result);
+			});
 	}
 
 	/// <summary>
@@ -57,12 +74,27 @@ public sealed class ComponentRegistryGenerator : IIncrementalGenerator
 	/// <returns></returns>
 	private static bool ShouldTypeBeRegistered(SyntaxNode node, CancellationToken cancellationToken)
 	{
-		if (node is not TypeDeclarationSyntax typeDeclarationSyntax)
+		cancellationToken.ThrowIfCancellationRequested();
+
+		if (node is InvocationExpressionSyntax invocationExpressionSyntax)
 		{
-			return false;
+			string methodCall = invocationExpressionSyntax.Expression.ToString();
+            
+			if (methodCall.Contains("Create") || methodCall.Contains("With") || methodCall.Contains("Query"))
+			{
+				return true;
+			}
 		}
 
-		return typeDeclarationSyntax.AttributeLists.Count != 0;
+		// if (node is ObjectCreationExpressionSyntax creationExpressionSyntax)
+		// {
+		// 	if (string.Equals(creationExpressionSyntax.Type.ToString(), "QueryDescription", StringComparison.Ordinal))
+		// 	{
+		// 		return true;
+		// 	}
+		// }
+
+		return false;
 	}
 
 	/// <summary>
@@ -71,67 +103,161 @@ public sealed class ComponentRegistryGenerator : IIncrementalGenerator
 	/// <param name="context"></param>
 	/// <param name="cancellationToken"></param>
 	/// <returns></returns>
-	private static (TypeDeclarationSyntax, bool attributeFound) GetMemberDeclarationsForSourceGen(GeneratorSyntaxContext context, CancellationToken cancellationToken)
+	private static (ImmutableArray<ComponentType>, bool foundTypes) GetMemberDeclarationsForSourceGen(GeneratorSyntaxContext context,
+		CancellationToken cancellationToken)
 	{
-		var typeDeclarationSyntax = (TypeDeclarationSyntax) context.Node;
+		cancellationToken.ThrowIfCancellationRequested();
 
-		// Stop here if we can't get the type symbol for some reason.
-		if (ModelExtensions.GetDeclaredSymbol(context.SemanticModel, typeDeclarationSyntax) is not ITypeSymbol symbol)
+		if (context.Node is ExpressionSyntax invocationExpressionSyntax)
 		{
-			return (typeDeclarationSyntax, false);
-		}
-
-		// Go through all the attributes.
-		foreach (var attributeData in symbol.GetAttributes())
-		{
-			if (attributeData.AttributeClass is null)
+			if (TryGetTypesFromInvocationExpression(invocationExpressionSyntax, ref context, cancellationToken, out ImmutableArray<ComponentType> types))
 			{
-				continue;
-			}
-
-			// If the attribute is the Component attribute, we can stop here and return true.
-			if (string.Equals(attributeData.AttributeClass.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat), "global::Arch.AOT.SourceGenerator.ComponentAttribute",
-				    StringComparison.Ordinal))
-			{
-				return (typeDeclarationSyntax, true);
+				return (types, true);
 			}
 		}
 
-		// No attribute found, return false.
-		return (typeDeclarationSyntax, false);
+		if (context.Node is ObjectCreationExpressionSyntax creationExpressionSyntax)
+		{
+			if (TryGetTypesFromCreationExpression(creationExpressionSyntax, ref context, cancellationToken, out ImmutableArray<ComponentType> types))
+			{
+				return (types, true);
+			}
+		}
+
+		// No usage found, return false.
+		return (ImmutableArray<ComponentType>.Empty, false);
 	}
 
-	private void GenerateCode(SourceProductionContext productionContext, Compilation compilation, ImmutableArray<TypeDeclarationSyntax> typeList)
+	private static bool TryGetTypesFromInvocationExpression(ExpressionSyntax invocationExpressionSyntax,
+		ref GeneratorSyntaxContext context,
+		in CancellationToken cancellationToken,
+		out ImmutableArray<ComponentType> types)
 	{
-		var sb = new StringBuilder();
-		_componentTypes.Clear();
-
-		foreach (var type in typeList)
+		types = ImmutableArray<ComponentType>.Empty;
+		SymbolInfo symbol = context.SemanticModel.GetSymbolInfo(invocationExpressionSyntax, cancellationToken);
+		if (symbol.Symbol is IMethodSymbol methodSymbol)
 		{
-			// Get the symbol for the type.
-			var symbol = ModelExtensions.GetDeclaredSymbol(compilation.GetSemanticModel(type.SyntaxTree), type);
-
-			// If the symbol is not a type symbol, we can't do anything with it.
-			if (symbol is not ITypeSymbol typeSymbol)
+			Log.LogInfo($"METHOD SYMBOL FOUND {methodSymbol.Name} | {methodSymbol.ContainingType} | {methodSymbol.TypeArguments.Length}");
+			
+			if(methodSymbol.TypeArguments.Length == 0) return false;
+            
+			if (methodSymbol.ContainingType.IsSymbol("global::Arch.Core.World"))
 			{
-				continue;
-			}
-
-			// Check if there are any fields in the type.
-			var hasZeroFields = true;
-			foreach (var member in typeSymbol.GetMembers())
-			{
-				if (member is not IFieldSymbol) continue;
+				if (methodSymbol.IsMethod("Create"))
+				{
+					goto GetTypes;
+				}
 				
-				hasZeroFields = false;
-				break;
+				if(methodSymbol.Name.Contains("Query"))
+				{
+					goto GetTypes;
+				}
 			}
+			else if (methodSymbol.ContainingType.IsSymbol("global::Arch.Core.QueryDescription") && IsQueryDescriptionMethod(methodSymbol.Name))
+			{
+				goto GetTypes;
+			}
+			
+			goto EmptyTypes;
 
-			var typeName = typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-			_componentTypes.Add(new ComponentType(typeName, hasZeroFields, typeSymbol.IsValueType));
+			GetTypes:
+			foreach (ITypeSymbol typeArgument in methodSymbol.TypeArguments)
+			{
+				cancellationToken.ThrowIfCancellationRequested();
+
+				var interfaces = typeArgument.AllInterfaces;
+				if (interfaces.Length > 0)
+				{
+					bool hasForEach = false;
+					
+					foreach (INamedTypeSymbol @interface in interfaces)
+					{
+						if (@interface.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat).StartsWith("global::Arch.Core.IForEach", StringComparison.Ordinal))
+						{
+							Log.LogInfo($"FOUND IFOREACH {typeArgument.Name}");
+							hasForEach = true;
+						}
+					}
+
+					if (hasForEach)
+					{
+						continue;
+					}
+				}
+
+				types = types.Add(new ComponentType(typeArgument.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat), typeArgument.HasZeroFields(),
+					typeArgument.IsValueType));
+			}
 		}
 
-		sb.AppendComponentTypes(_componentTypes);
-		productionContext.AddSource("GeneratedComponentRegistry.g.cs",CSharpSyntaxTree.ParseText(sb.ToString()).GetRoot().NormalizeWhitespace().ToFullString());
+		EmptyTypes:
+		return types.Length > 0;
+	}
+
+	private static bool TryGetTypesFromCreationExpression(ObjectCreationExpressionSyntax invocationExpressionSyntax,
+		ref GeneratorSyntaxContext context,
+		in CancellationToken cancellationToken,
+		out ImmutableArray<ComponentType> types)
+	{
+		return false;
+	}
+
+	private static bool IsQueryDescriptionMethod(in string methodName)
+	{
+		for (int i = 0; i < _archQueryDescriptionMethods.Length; i++)
+		{
+			if (string.Equals(methodName, _archQueryDescriptionMethods[i], StringComparison.Ordinal))
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private static void GenerateCode(SourceProductionContext productionContext, ImmutableArray<ComponentType> typeList)
+	{
+		Log.LogInfo($"GENERATING COMPONENT REGISTRY FOR {typeList.Length} COMPONENTS");
+
+		if (typeList.IsDefaultOrEmpty)
+		{
+			return;
+		}
+
+		StringBuilder sb = new StringBuilder();
+		sb.AppendComponentTypes(typeList);
+		productionContext.AddSource("GeneratedComponentRegistry.g.cs",
+			CSharpSyntaxTree.ParseText(sb.ToString()).GetRoot().NormalizeWhitespace().ToFullString());
+
+		// var sb = new StringBuilder();
+		// _componentTypes.Clear();
+		//
+		// foreach (var type in typeList)
+		// {
+		// 	// Get the symbol for the type.
+		// 	var symbol = ModelExtensions.GetDeclaredSymbol(compilation.GetSemanticModel(type.SyntaxTree), type);
+		//
+		// 	// If the symbol is not a type symbol, we can't do anything with it.
+		// 	if (symbol is not ITypeSymbol typeSymbol)
+		// 	{
+		// 		continue;
+		// 	}
+		//
+		// 	// Check if there are any fields in the type.
+		// 	var hasZeroFields = true;
+		// 	foreach (var member in typeSymbol.GetMembers())
+		// 	{
+		// 		if (member is not IFieldSymbol) continue;
+		// 		
+		// 		hasZeroFields = false;
+		// 		break;
+		// 	}
+		//
+		// 	var typeName = typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+		// 	_componentTypes.Add(new ComponentType(typeName, hasZeroFields, typeSymbol.IsValueType));
+		// }
+		//
+		// sb.AppendComponentTypes(_componentTypes);
+		// productionContext.AddSource("GeneratedComponentRegistry.g.cs",CSharpSyntaxTree.ParseText(sb.ToString()).GetRoot().NormalizeWhitespace().ToFullString());
 	}
 }
