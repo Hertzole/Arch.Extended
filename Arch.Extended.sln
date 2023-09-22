@@ -22,6 +22,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Arch.Relationships.Tests", 
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Arch.AOT.SourceGenerator", "Arch.AOT.SourceGenerator\Arch.AOT.SourceGenerator.csproj", "{0A00966E-A0B2-4BBA-B0B4-3F24D196C7A3}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Arch.AOT.SourceGenerator.Tests", "Arch.AOT.SourceGenerator.Tests\Arch.AOT.SourceGenerator.Tests.csproj", "{0CDA5A8F-8DF4-4E5D-9927-C4EEC7C1686E}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -72,5 +74,9 @@ Global
 		{0A00966E-A0B2-4BBA-B0B4-3F24D196C7A3}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{0A00966E-A0B2-4BBA-B0B4-3F24D196C7A3}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{0A00966E-A0B2-4BBA-B0B4-3F24D196C7A3}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0CDA5A8F-8DF4-4E5D-9927-C4EEC7C1686E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0CDA5A8F-8DF4-4E5D-9927-C4EEC7C1686E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0CDA5A8F-8DF4-4E5D-9927-C4EEC7C1686E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0CDA5A8F-8DF4-4E5D-9927-C4EEC7C1686E}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
